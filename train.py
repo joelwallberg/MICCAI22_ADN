@@ -26,14 +26,14 @@ NUM_SLICES = 40
 NUM_EXAMPLES = 1000  # not real ct number in dataset because randomly choose CT per step
 MAX_EPOCH = 100
 USE_REG_EPOCH = 2  # increase this number to extend the warm-start epochs
-GPU = "2, 3, 4, 5, 6, 7"
-root_dir = "/data/StrokeCT/adn"
+GPU = "0,1" # Use GPU 1
+root_dir = "/home/joelw/forks/MICCAI22_ADN"
 pos_weight = 1.0
 gamma = 64./255
 assert pos_weight == 1.0
 useless_label = [4]
 postfix = "-adn-wl%.1f" % (pos_weight)  # using dropout, sym rotation, gray-white matter
-data_dir = "/data/StrokeCT/AISD_data_resample"
+data_dir = "/mnt/data0/joelw/aisd"
 train_txt = "/data/StrokeCT/aisd_train.txt"
 class_weight = np.array([1.0, pos_weight])
 LEARNING_RATE = 1e-4
@@ -47,7 +47,7 @@ ASYM_RESTORE_FROM = ""
 # we actually use SPM results to train a resunet3D segmentation model to ease the coding
 GWM_SEG_RESTORE_FROM = "B0010_S003500.pth"
 # require pretrained transformation network
-ALIGN_RESTORE_FROM = "B0040_S012500.pth"
+ALIGN_RESTORE_FROM = "/home/joelw/mex/checkpoints/transform_net/align_model_256px.pth.tar"
 SEG_ASYM_RESTORE_FROM = ""
 SNAPSHOT_DIR = osp.join(root_dir, 'snapshots'+postfix)
 IMGSHOT_DIR = osp.join(root_dir, 'imgshots'+postfix)
@@ -209,9 +209,9 @@ def main():
     torch.manual_seed(args.random_seed)
 
     # tissue segmentation model
-    gwm_seg_model = ResidualUNet3D(in_channels=1, out_channels=5, f_maps=32, final_sigmoid=False,
-                                   use_transconv=False, use_dp=True, p=0.2, use_activation=False)
-    gwm_seg_model = nn.DataParallel(gwm_seg_model)
+    #gwm_seg_model = ResidualUNet3D(in_channels=1, out_channels=5, f_maps=32, final_sigmoid=False,
+    #                               use_transconv=False, use_dp=True, p=0.2, use_activation=False)
+    #gwm_seg_model = nn.DataParallel(gwm_seg_model)
 
     # alignment model
     align_model = PlaneFinder(is_train=False)
@@ -252,16 +252,16 @@ def main():
             print("=> no checkpoint found at '{}'".format(args.align_restore_from))
             exit(-1)
 
-    if args.gwm_seg_restore_from:
-        if os.path.isfile(args.gwm_seg_restore_from):
-            print("=> loading checkpoint '{}'".format(args.gwm_seg_restore_from))
-            checkpoint = torch.load(args.gwm_seg_restore_from)
-            gwm_seg_model.load_state_dict(checkpoint['state_dict'])
-            print("=> loaded checkpoint '{}' (step {})"
-                  .format(args.gwm_seg_restore_from, args.start_step))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.gwm_seg_restore_from))
-            exit(-1)
+    # if args.gwm_seg_restore_from:
+    #     if os.path.isfile(args.gwm_seg_restore_from):
+    #         print("=> loading checkpoint '{}'".format(args.gwm_seg_restore_from))
+    #         checkpoint = torch.load(args.gwm_seg_restore_from)
+    #         gwm_seg_model.load_state_dict(checkpoint['state_dict'])
+    #         print("=> loaded checkpoint '{}' (step {})"
+    #               .format(args.gwm_seg_restore_from, args.start_step))
+    #     else:
+    #         print("=> no checkpoint found at '{}'".format(args.gwm_seg_restore_from))
+    #         exit(-1)
 
     if args.asym_restore_from:
         if os.path.isfile(args.asym_restore_from):
@@ -296,8 +296,8 @@ def main():
     align_model.eval()
     align_model.cuda()
 
-    gwm_seg_model.eval()
-    gwm_seg_model.cuda()
+    #gwm_seg_model.eval()
+    #gwm_seg_model.cuda()
 
     seg_model.train()
     seg_model.cuda()
@@ -306,7 +306,7 @@ def main():
     asym_model.cuda()
 
     cudnn.benchmark = True
-    trainloader = data.DataLoader(StrokeTrain3D(data_dir=data_dir, train_txt=train_txt,
+    trainloader = data.DataLoader(StrokeTrain3D(data_dir=data_dir,
                                                 num_ct=NUM_EXAMPLES, gamma=gamma,
                                                 is_mirror=args.random_mirror,
                                                 is_jitter=args.random_jitter,
@@ -332,7 +332,7 @@ def main():
 
             data_time.update(timeit.default_timer() - iter_end)
 
-            images, labels, patch_name = batch
+            images, labels, wm_msks, gm_msks, csf_msks, patch_name = batch
 
             images = images.cuda()
             labels = labels.cuda()
@@ -345,20 +345,28 @@ def main():
                 sym_comp_t[diff_t == 0] = images_t[diff_t == 0]
                 sym_comp_t[diff_t < 0] = images_t_f[diff_t < 0]
                 asym_map_t = nn.ReLU()(images_t_f - images_t)
-                # infer gray-white matter
-                gwm_logits_t = gwm_seg_model(images_t)
-                gwm_msks_t = gwm_logits_t.argmax(dim=1)
-                gm_msks_t = (gwm_msks_t == 1).type(torch.float32)
-                gm_msks_t = gm_msks_t.unsqueeze(dim=1)
-                gm_msks_t_f = transforms.functional.hflip(gm_msks_t)
-                wm_msks_t = (gwm_msks_t == 2).type(torch.float32)
-                wm_msks_t = wm_msks_t.unsqueeze(dim=1)
-                gw_diff_t = torch.logical_and(gm_msks_t_f, wm_msks_t)
-                # infer csf
-                csf_msks_t = (gwm_msks_t == 3).type(torch.float32)
-                csf_msks_t = csf_msks_t.unsqueeze(dim=1)
+                # # infer gray-white matter
+                # gwm_logits_t = gwm_seg_model(images_t)
+                # gwm_msks_t = gwm_logits_t.argmax(dim=1)
+                # gm_msks_t = (gwm_msks_t == 1).type(torch.float32)
+                # gm_msks_t = gm_msks_t.unsqueeze(dim=1)
+                # gm_msks_t_f = transforms.functional.hflip(gm_msks_t)
+                # wm_msks_t = (gwm_msks_t == 2).type(torch.float32)
+                # wm_msks_t = wm_msks_t.unsqueeze(dim=1)
+                # gw_diff_t = torch.logical_and(gm_msks_t_f, wm_msks_t)
+                # # infer csf
+                # csf_msks_t = (gwm_msks_t == 3).type(torch.float32)
+                # csf_msks_t = csf_msks_t.unsqueeze(dim=1)
+
+            # Apply transformation to masks
+            gm_msks_t = stn(gm_msks.unsqueeze(dim=1), M[:, :3, :]).type(torch.float32)
+            gm_msks_t_f = transforms.functional.hflip(gm_msks_t)
+            wm_msks_t = stn(wm_msks.unsqueeze(dim=1), M[:, :3, :]).type(torch.float32)
+            gw_diff_t = torch.logical_and(gm_msks_t_f, wm_msks_t)
+            csf_msks_t = stn(csf_msks.unsqueeze(dim=1), M[:, :3, :]).type(torch.float32)
 
             labels_t = stn(labels.unsqueeze(dim=1), M[:, :3, :]).squeeze(dim=1)
+
 
             # deal with special value 4
             useless_area_t = torch.zeros_like(labels_t, dtype=torch.bool)
